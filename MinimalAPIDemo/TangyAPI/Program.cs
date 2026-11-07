@@ -1,4 +1,29 @@
+using AutoMapper;
+using Microsoft.EntityFrameworkCore;
+using Scalar.AspNetCore;
+using TangyAPI.Data;
+using TangyAPI.Models;
+using TangyAPI.Models.DTO;
+
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddDbContext<ApplicationDbContext>(option =>
+option.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+builder.Services.AddValidation();
+builder.Services.AddProblemDetails();
+
+builder.Services.AddAutoMapper(config =>
+{
+    // Category Mappings
+    config.CreateMap<Category, CategoryDto>();
+    config.CreateMap<CreateCategoryDto, Category>()
+    .ForMember(dest => dest.Id, opt => opt.Ignore())
+    .ForMember(dest => dest.AddedDate, opt => opt.Ignore());
+    config.CreateMap<UpdateCategoryDto, Category>()
+    .ForMember(dest => dest.Id, opt => opt.Ignore())
+    .ForMember(dest => dest.AddedDate, opt => opt.Ignore());
+});
 
 // Add services to the container.
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
@@ -7,35 +32,53 @@ builder.Services.AddOpenApi();
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-}
+app.MapOpenApi();
+app.MapScalarApiReference();
 
 app.UseHttpsRedirection();
 
-var summaries = new[]
+// Get all categories
+app.MapGet("/api/categories", async (ApplicationDbContext db, CancellationToken ct) =>
 {
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+    var categories = await db.Categories.ToListAsync(ct);
 
-app.MapGet("/weatherforecast", () =>
+    return Results.Ok(categories);
+}).WithName("GetAllCategories");
+
+// Get category by id
+app.MapGet("/api/categories/{id:int}", async (int id, ApplicationDbContext db, ILogger<Program> logger, CancellationToken ct) =>
 {
-    var forecast = Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+    if (logger.IsEnabled(LogLevel.Information))
+    {
+        logger.LogInformation("Fetching category with id: {Id}", id);
+    }
+
+    if (id <= 0)
+    {
+        logger.LogWarning("Invalid category id: {Id}", id);
+        return Results.BadRequest(new { Message = "Invalid category id." });
+    }
+
+    var category = await db.Categories.FirstOrDefaultAsync(c => c.Id == id, ct);
+
+    return category is not null ? Results.Ok(category) : Results.NotFound();
+}).WithName("GetCategoryById");
+
+// Create a category
+app.MapPost("/api/categories", async (CreateCategoryDto createDto, ApplicationDbContext db, IMapper mapper, CancellationToken ct) =>
+{
+    var category = mapper.Map<Category>(createDto);
+    category.AddedDate = DateTime.Now;
+
+    await db.Categories.AddAsync(category, ct);
+    await db.SaveChangesAsync(ct);
+
+    var categoryDto = mapper.Map<CategoryDto>(category);
+
+    return Results.Created($"/api/categories/{category.Id}", categoryDto);
+}).WithName("CreateCategory")
+.Accepts<CreateCategoryDto>("application/json")
+.Produces<CategoryDto>(StatusCodes.Status201Created)
+.ProducesProblem(StatusCodes.Status400BadRequest);
 
 app.Run();
-
-internal record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
